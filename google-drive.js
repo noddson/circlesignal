@@ -92,7 +92,7 @@ export class GoogleDriveVaultBackup {
           : resolve(tokenResponse),
         error_callback: () => reject(new Error("Google authorization was cancelled or could not be completed.")),
       });
-      client.requestAccessToken({ prompt: "consent" });
+      client.requestAccessToken();
     });
     this.accessToken = response.access_token;
     this.expiresAt = Date.now() + Math.max(0, Number(response.expires_in || 3600) - 60) * 1000;
@@ -100,10 +100,22 @@ export class GoogleDriveVaultBackup {
   }
 
   disconnect() {
-    const token = this.accessToken;
     this.accessToken = null;
     this.expiresAt = 0;
-    if (token && this.googleApi?.accounts?.oauth2?.revoke) this.googleApi.accounts.oauth2.revoke(token, () => {});
+  }
+
+  async revokeAccess({ deleteBackups = false } = {}) {
+    if (!this.connected || !this.googleApi?.accounts?.oauth2?.revoke) {
+      throw new Error("Connect Google Drive before revoking access.");
+    }
+    const deletedBackups = deleteBackups ? await this.deleteBackups() : 0;
+    const token = this.accessToken;
+    const response = await new Promise((resolve) => this.googleApi.accounts.oauth2.revoke(token, resolve));
+    this.disconnect();
+    if (response?.successful === false) {
+      throw new Error(response.error_description || "Google Drive access could not be revoked.");
+    }
+    return { deletedBackups };
   }
 
   async authorizedFetch(url, options = {}) {
@@ -131,6 +143,14 @@ export class GoogleDriveVaultBackup {
     const response = await this.authorizedFetch(`${DRIVE_FILES_URL}?${params}`);
     const body = await response.json();
     return Array.isArray(body.files) ? body.files : [];
+  }
+
+  async deleteBackups() {
+    const files = await this.listBackups();
+    for (const file of files) {
+      await this.authorizedFetch(`${DRIVE_FILES_URL}/${encodeURIComponent(file.id)}`, { method: "DELETE" });
+    }
+    return files.length;
   }
 
   async backup(envelope) {

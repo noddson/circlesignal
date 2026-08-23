@@ -76,7 +76,7 @@ const el = {
   changeDeviceOption: $("#change-device-option"), changeDeviceUnlock: $("#change-device-unlock"), changeDeviceCopy: $("#change-device-copy"),
   recoveryCodeDialog: $("#recovery-code-dialog"), recoveryCodeForm: $("#recovery-code-form"), recoveryCodeValue: $("#recovery-code-value"), downloadRecoveryCode: $("#download-recovery-code"), recoveryCodeSaved: $("#recovery-code-saved"), recoveryCodeClose: $("#recovery-code-close"),
   purgeVaultDialog: $("#purge-vault-dialog"), purgeVaultForm: $("#purge-vault-form"), purgeVaultFirst: $("#purge-vault-first"), purgeVaultFinal: $("#purge-vault-final"),
-  purgeVaultConfirmation: $("#purge-vault-confirmation"), purgeVaultSubmit: $("#purge-vault-submit"), purgeVaultError: $("#purge-vault-error"),
+  purgeGoogleAccess: $("#purge-google-access"), purgeGoogleBackup: $("#purge-google-backup"), purgeVaultConfirmation: $("#purge-vault-confirmation"), purgeVaultSubmit: $("#purge-vault-submit"), purgeVaultError: $("#purge-vault-error"),
 };
 
 let entries = [];
@@ -857,8 +857,13 @@ function restoreUnlockedVault(unlocked) {
 }
 
 function resetPurgeDialog() {
+  const googleConfigured = googleDriveBackup.configured;
   el.purgeVaultFirst.hidden = false;
   el.purgeVaultFinal.hidden = true;
+  el.purgeGoogleAccess.checked = googleConfigured;
+  el.purgeGoogleAccess.disabled = !googleConfigured;
+  el.purgeGoogleBackup.checked = false;
+  el.purgeGoogleBackup.disabled = !googleConfigured;
   el.purgeVaultConfirmation.value = "";
   el.purgeVaultSubmit.disabled = true;
   el.purgeVaultError.hidden = true;
@@ -1193,6 +1198,10 @@ el.purgeVaultConfirmation.addEventListener("input", () => {
   el.purgeVaultSubmit.disabled = el.purgeVaultConfirmation.value.trim() !== "PURGE";
   el.purgeVaultError.hidden = true;
 });
+el.purgeGoogleAccess.addEventListener("change", () => {
+  if (!el.purgeGoogleAccess.checked) el.purgeGoogleBackup.checked = false;
+  el.purgeGoogleBackup.disabled = !el.purgeGoogleAccess.checked;
+});
 el.purgeVaultForm.addEventListener("submit", async (event) => {
   event.preventDefault();
   if (el.purgeVaultConfirmation.value.trim() !== "PURGE") {
@@ -1203,6 +1212,20 @@ el.purgeVaultForm.addEventListener("submit", async (event) => {
   el.purgeVaultSubmit.disabled = true;
   el.purgeVaultSubmit.textContent = "Purging…";
   try {
+    const revokeGoogleAccess = el.purgeGoogleAccess.checked;
+    const deleteGoogleBackups = revokeGoogleAccess && el.purgeGoogleBackup.checked;
+    let googleResult = null;
+    if (revokeGoogleAccess) {
+      if (!googleDriveBackup.connected) {
+        el.purgeVaultSubmit.textContent = "Connecting to Google…";
+        await googleDriveBackup.connect();
+      }
+      el.purgeVaultSubmit.textContent = deleteGoogleBackups ? "Removing Drive backup…" : "Revoking Drive access…";
+      googleResult = await googleDriveBackup.revokeAccess({ deleteBackups: deleteGoogleBackups });
+    } else {
+      googleDriveBackup.disconnect();
+    }
+    el.purgeVaultSubmit.textContent = "Purging…";
     await purgeVault();
     clearPendingAuditLog();
     clearVaultUnlockFailures();
@@ -1218,12 +1241,15 @@ el.purgeVaultForm.addEventListener("submit", async (event) => {
     renderWorkspace();
     updateVaultUI();
     if (!entries.length) switchTab("setup");
-    showToast("Encrypted vault permanently purged from this browser context");
+    showToast(googleResult
+      ? `Vault purged and Google Drive access revoked${googleResult.deletedBackups ? "; Drive backup deleted" : ""}`
+      : "Encrypted vault permanently purged from this browser context");
   } catch (error) {
     el.purgeVaultError.textContent = error.message;
     el.purgeVaultError.hidden = false;
   } finally {
     el.purgeVaultSubmit.textContent = "Permanently purge vault";
+    el.purgeVaultSubmit.disabled = el.purgeVaultConfirmation.value.trim() !== "PURGE";
   }
 });
 

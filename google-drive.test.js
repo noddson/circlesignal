@@ -99,7 +99,7 @@ test("restore downloads the only backup and validates it before returning", asyn
   assert.equal(restored.envelope.vault.validated, true);
 });
 
-test("authorization is kept only in memory and can be revoked", async () => {
+test("authorization is kept only in memory and disconnect preserves the account grant", async () => {
   let requested;
   let revoked;
   const googleApi = { accounts: { oauth2: {
@@ -114,10 +114,71 @@ test("authorization is kept only in memory and can be revoked", async () => {
   const drive = new GoogleDriveVaultBackup({ clientId: CLIENT_ID, loadIdentity: async () => googleApi });
   await drive.connect();
   assert.equal(requested.options.scope, DRIVE_APPDATA_SCOPE);
-  assert.equal(requested.requestOptions.prompt, "consent");
+  assert.equal(requested.requestOptions, undefined);
   assert.equal(drive.connected, true);
   drive.disconnect();
-  assert.equal(revoked, "fresh-token");
+  assert.equal(revoked, undefined);
+  assert.equal(drive.connected, false);
+});
+
+test("revoking access can delete the Drive backup first", async () => {
+  const requests = [];
+  let revoked;
+  const googleApi = { accounts: { oauth2: {
+    initTokenClient(options) {
+      return { requestAccessToken() { options.callback({ access_token: "purge-token", expires_in: 3600 }); } };
+    },
+    revoke(token, callback) {
+      revoked = token;
+      callback({ successful: true });
+    },
+  } } };
+  const drive = new GoogleDriveVaultBackup({
+    clientId: CLIENT_ID,
+    loadIdentity: async () => googleApi,
+    fetchImpl: async (url, options = {}) => {
+      requests.push({ url: String(url), options });
+      if ((options.method || "GET") === "GET") {
+        return new Response(JSON.stringify({ files: [{ id: "backup-one" }, { id: "backup-two" }] }), { status: 200 });
+      }
+      return new Response(null, { status: 204 });
+    },
+  });
+  await drive.connect();
+  const result = await drive.revokeAccess({ deleteBackups: true });
+  assert.equal(result.deletedBackups, 2);
+  assert.equal(requests.length, 3);
+  assert.match(requests[1].url, /files\/backup-one$/);
+  assert.match(requests[2].url, /files\/backup-two$/);
+  assert.equal(requests[1].options.method, "DELETE");
+  assert.equal(requests[2].options.method, "DELETE");
+  assert.equal(revoked, "purge-token");
+  assert.equal(drive.connected, false);
+});
+
+test("revoking access leaves the Drive backup untouched unless deletion is selected", async () => {
+  let fetchCalled = false;
+  const googleApi = { accounts: { oauth2: {
+    initTokenClient(options) {
+      return { requestAccessToken() { options.callback({ access_token: "revoke-only-token", expires_in: 3600 }); } };
+    },
+    revoke(token, callback) {
+      assert.equal(token, "revoke-only-token");
+      callback({ successful: true });
+    },
+  } } };
+  const drive = new GoogleDriveVaultBackup({
+    clientId: CLIENT_ID,
+    loadIdentity: async () => googleApi,
+    fetchImpl: async () => {
+      fetchCalled = true;
+      throw new Error("Drive files should not be accessed");
+    },
+  });
+  await drive.connect();
+  const result = await drive.revokeAccess();
+  assert.equal(result.deletedBackups, 0);
+  assert.equal(fetchCalled, false);
   assert.equal(drive.connected, false);
 });
 
